@@ -1,6 +1,6 @@
 from fastapi import FastAPI
 from pydantic import BaseModel
-from typing import List
+from typing import List, Optional
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.metrics.pairwise import cosine_similarity
 from datetime import datetime
@@ -9,15 +9,20 @@ app = FastAPI(title="Feed Recommendation API (MongoDB-Compatible)")
 
 
 # ---------------------------
-# Models (match your MongoDB schema)
+# MongoDB-Compatible Models
 # ---------------------------
 
 class Post(BaseModel):
-    id: int
-    content: str
-    likes: int
-    views: int
-    created_at: str
+    id: str                              # MongoDB ObjectId as string
+    user: Optional[str] = None            # Post author ObjectId
+    title: str
+    description: str
+    category: str
+    mediaType: Optional[str] = None
+    mediaUrl: Optional[str] = None
+    likes: Optional[List[str]] = []       # List of user ObjectIds
+    dislikes: Optional[List[str]] = []    # List of user ObjectIds
+    created_at: str                       # ISO format (e.g. "2025-11-01T12:00:00")
 
 
 class User(BaseModel):
@@ -37,16 +42,32 @@ class RequestData(BaseModel):
 # Helper functions
 # ---------------------------
 
-def days_since(date_str):
-    date = datetime.strptime(date_str, "%Y-%m-%d")
+def days_since(date_str: str) -> int:
+    """
+    Calculate days since the post was created.
+    Accepts both 'YYYY-MM-DD' and full ISO date strings.
+    """
+    try:
+        date = datetime.fromisoformat(date_str.replace("Z", ""))
+    except ValueError:
+        date = datetime.strptime(date_str, "%Y-%m-%d")
     return (datetime.now() - date).days + 1
 
 
 def recommend_posts_for_user(user, posts):
-    # Combine all interests into one string for TF-IDF
-    interests_text = " ".join(user["interests"]) if user.get("interests") else ""
+    """
+    Recommend posts based on:
+    - Content similarity (TF-IDF on title, description, category)
+    - Engagement (likes/dislikes ratio)
+    - Recency (newer posts are ranked higher)
+    """
+    interests_text = " ".join(user.get("interests", []))
 
-    corpus = [interests_text] + [p["content"] for p in posts]
+    # Combine content fields
+    corpus = [interests_text] + [
+        f"{p['title']} {p['description']} {p.get('category', '')}" for p in posts
+    ]
+
     vectorizer = TfidfVectorizer(stop_words="english")
     tfidf = vectorizer.fit_transform(corpus)
 
@@ -57,19 +78,30 @@ def recommend_posts_for_user(user, posts):
     recommendations = []
     for i, post in enumerate(posts):
         similarity = similarities[i]
-        likes = post.get("likes", 0)
-        views = post.get("views", 0)
-        engagement = (likes * 0.7 + views * 0.3) / 100
+        likes = len(post.get("likes", []))
+        dislikes = len(post.get("dislikes", []))
+        total_engagement = likes + dislikes
+
+        # Engagement score (weighted likes)
+        engagement = (likes - 0.5 * dislikes) / (total_engagement + 1)
+
+        # Recency (newer posts get more weight)
         recency = 1 / days_since(post["created_at"])
+
+        # Weighted scoring
         score = 0.6 * similarity + 0.3 * engagement + 0.1 * recency
 
         recommendations.append({
             "post_id": post["id"],
-            "content": post["content"],
+            "title": post["title"],
+            "description": post["description"],
+            "category": post["category"],
+            "mediaType": post.get("mediaType"),
+            "mediaUrl": post.get("mediaUrl"),
             "score": round(score, 4),
             "similarity": round(similarity, 3),
             "engagement": round(engagement, 3),
-            "recency": round(recency, 3)
+            "recency": round(recency, 3),
         })
 
     recommendations.sort(key=lambda x: x["score"], reverse=True)
