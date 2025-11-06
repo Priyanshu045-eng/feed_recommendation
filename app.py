@@ -5,7 +5,12 @@ from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.metrics.pairwise import cosine_similarity
 from datetime import datetime
 
-app = FastAPI(title="Post Recommendation API")
+app = FastAPI(title="Feed Recommendation API (MongoDB-Compatible)")
+
+
+# ---------------------------
+# Models (match your MongoDB schema)
+# ---------------------------
 
 class Post(BaseModel):
     id: int
@@ -14,19 +19,34 @@ class Post(BaseModel):
     views: int
     created_at: str
 
+
 class User(BaseModel):
-    interests: str
+    name: str
+    email: str
+    branch: str
+    interests: List[str]
+    year: str
+
 
 class RequestData(BaseModel):
     user: User
     posts: List[Post]
 
+
+# ---------------------------
+# Helper functions
+# ---------------------------
+
 def days_since(date_str):
     date = datetime.strptime(date_str, "%Y-%m-%d")
     return (datetime.now() - date).days + 1
 
+
 def recommend_posts_for_user(user, posts):
-    corpus = [user["interests"]] + [p["content"] for p in posts]
+    # Combine all interests into one string for TF-IDF
+    interests_text = " ".join(user["interests"]) if user.get("interests") else ""
+
+    corpus = [interests_text] + [p["content"] for p in posts]
     vectorizer = TfidfVectorizer(stop_words="english")
     tfidf = vectorizer.fit_transform(corpus)
 
@@ -54,6 +74,11 @@ def recommend_posts_for_user(user, posts):
 
     recommendations.sort(key=lambda x: x["score"], reverse=True)
     return recommendations
+
+
+# ---------------------------
+# API Endpoint
+# ---------------------------
 
 @app.post("/recommend")
 def get_recommendations(data: RequestData):
