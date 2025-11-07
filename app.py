@@ -123,3 +123,7 @@ async def recommend_posts(request: UserRequest):
         return {"recommendations": recommended_posts}
     except Exception as e:
         return {"error": str(e)}
+@app.get("/")
+def home():
+    return {"message": "Backend running successfully on Render 🚀"}
+
