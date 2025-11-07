@@ -4,70 +4,74 @@ from typing import List, Optional
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.metrics.pairwise import cosine_similarity
 from datetime import datetime
+import motor.motor_asyncio
+from dotenv import load_dotenv
+import os
+
+load_dotenv()
 
 app = FastAPI(title="Feed Recommendation API (MongoDB-Compatible)")
 
+# ---------------- MongoDB Setup ----------------
+MONGO_URI = os.getenv("MONGO_URI", "mongodb://localhost:27017")
+client = motor.motor_asyncio.AsyncIOMotorClient(MONGO_URI)
+db = client["auth-db"]
+users_collection = db.users
+posts_collection = db.posts
 
-# ---------------------------
-# MongoDB-Compatible Models
-# ---------------------------
+# ✅ Startup event to verify MongoDB connection
+@app.on_event("startup")
+async def startup_db_client():
+    try:
+        await client.admin.command('ping')
+        print("✅ MongoDB connected successfully!")
+    except Exception as e:
+        print("❌ MongoDB connection failed:", e)
 
-class Post(BaseModel):
-    id: str                              # MongoDB ObjectId as string
-    user: Optional[str] = None            # Post author ObjectId
+# ---------------- Models ----------------
+class RecommendedPost(BaseModel):
+    post_id: str
     title: str
     description: str
     category: str
-    mediaType: Optional[str] = None
-    mediaUrl: Optional[str] = None
-    likes: Optional[List[str]] = []       # List of user ObjectIds
-    dislikes: Optional[List[str]] = []    # List of user ObjectIds
-    created_at: str                       # ISO format (e.g. "2025-11-01T12:00:00")
+    mediaType: Optional[str]
+    mediaUrl: Optional[str]
+    score: float
+    similarity: float
+    engagement: float
+    recency: float
+
+class RecommendPostsResponse(BaseModel):
+    recommendations: Optional[List[RecommendedPost]] = None
+    error: Optional[str] = None
+
+class UserRequest(BaseModel):
+    user_id: str
+    top_n: int = 10  # Number of recommended posts
+
+# ---------------- Helper Functions ----------------
 
 
-class User(BaseModel):
-    name: str
-    email: str
-    branch: str
-    interests: List[str]
-    year: str
+def days_since(date_input) -> int:
+    if isinstance(date_input, str):
+        try:
+            # Try ISO format first
+            date = datetime.fromisoformat(date_input.replace("Z", ""))
+        except ValueError:
+            # Fallback for 'YYYY-MM-DD'
+            date = datetime.strptime(date_input, "%Y-%m-%d")
+    elif isinstance(date_input, datetime):
+        date = date_input
+    else:
+        # If missing or unknown type, treat as now
+        date = datetime.now()
+    return max((datetime.now() - date).days, 1)
 
 
-class RequestData(BaseModel):
-    user: User
-    posts: List[Post]
-
-
-# ---------------------------
-# Helper functions
-# ---------------------------
-
-def days_since(date_str: str) -> int:
-    """
-    Calculate days since the post was created.
-    Accepts both 'YYYY-MM-DD' and full ISO date strings.
-    """
-    try:
-        date = datetime.fromisoformat(date_str.replace("Z", ""))
-    except ValueError:
-        date = datetime.strptime(date_str, "%Y-%m-%d")
-    return (datetime.now() - date).days + 1
-
-
-def recommend_posts_for_user(user, posts):
-    """
-    Recommend posts based on:
-    - Content similarity (TF-IDF on title, description, category)
-    - Engagement (likes/dislikes ratio)
-    - Recency (newer posts are ranked higher)
-    """
-    interests_text = " ".join(user.get("interests", []))
-
-    # Combine content fields
-    corpus = [interests_text] + [
-        f"{p['title']} {p['description']} {p.get('category', '')}" for p in posts
+def calculate_post_score(user_interests_text, posts):
+    corpus = [user_interests_text] + [
+        f"{p['title']} {p['description']} {p.get('category','')}" for p in posts
     ]
-
     vectorizer = TfidfVectorizer(stop_words="english")
     tfidf = vectorizer.fit_transform(corpus)
 
@@ -81,18 +85,12 @@ def recommend_posts_for_user(user, posts):
         likes = len(post.get("likes", []))
         dislikes = len(post.get("dislikes", []))
         total_engagement = likes + dislikes
-
-        # Engagement score (weighted likes)
         engagement = (likes - 0.5 * dislikes) / (total_engagement + 1)
-
-        # Recency (newer posts get more weight)
-        recency = 1 / days_since(post["created_at"])
-
-        # Weighted scoring
+        recency = 1 / days_since(post["createdAt"])
         score = 0.6 * similarity + 0.3 * engagement + 0.1 * recency
 
         recommendations.append({
-            "post_id": post["id"],
+            "post_id": str(post["_id"]),
             "title": post["title"],
             "description": post["description"],
             "category": post["category"],
@@ -101,20 +99,27 @@ def recommend_posts_for_user(user, posts):
             "score": round(score, 4),
             "similarity": round(similarity, 3),
             "engagement": round(engagement, 3),
-            "recency": round(recency, 3),
+            "recency": round(recency, 3)
         })
 
     recommendations.sort(key=lambda x: x["score"], reverse=True)
     return recommendations
 
+# ---------------- API Endpoint ----------------
+@app.post("/recommend_posts/", response_model=RecommendPostsResponse)
+async def recommend_posts(request: UserRequest):
+    try:
+        from bson import ObjectId
+        user = await users_collection.find_one({"_id": ObjectId(request.user_id)})
+        if not user:
+            return {"error": f"User with id {request.user_id} not found."}
 
-# ---------------------------
-# API Endpoint
-# ---------------------------
+        user_interests_text = " ".join(user.get("interests", []))
+        posts = await posts_collection.find({}).to_list(length=1000)
+        if not posts:
+            return {"error": "No posts found in database."}
 
-@app.post("/recommend")
-def get_recommendations(data: RequestData):
-    user = data.user.dict()
-    posts = [p.dict() for p in data.posts]
-    recommendations = recommend_posts_for_user(user, posts)
-    return {"recommendations": recommendations}
+        recommended_posts = calculate_post_score(user_interests_text, posts)
+        return {"recommendations": recommended_posts}
+    except Exception as e:
+        return {"error": str(e)}
