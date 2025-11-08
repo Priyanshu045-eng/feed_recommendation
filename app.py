@@ -12,14 +12,12 @@ load_dotenv()
 
 app = FastAPI(title="Feed Recommendation API (MongoDB-Compatible)")
 
-# ---------------- MongoDB Setup ----------------
 MONGO_URI = os.getenv("MONGO_URI", "mongodb://localhost:27017")
 client = motor.motor_asyncio.AsyncIOMotorClient(MONGO_URI)
 db = client["auth-db"]
 users_collection = db.users
 posts_collection = db.posts
 
-# ✅ Startup event to verify MongoDB connection
 @app.on_event("startup")
 async def startup_db_client():
     try:
@@ -28,7 +26,6 @@ async def startup_db_client():
     except Exception as e:
         print("❌ MongoDB connection failed:", e)
 
-# ---------------- Models ----------------
 class RecommendedPost(BaseModel):
     post_id: str
     title: str
@@ -47,23 +44,21 @@ class RecommendPostsResponse(BaseModel):
 
 class UserRequest(BaseModel):
     user_id: str
-    top_n: int = 10  # Number of recommended posts
+    top_n: int = 10 
 
-# ---------------- Helper Functions ----------------
 
 
 def days_since(date_input) -> int:
     if isinstance(date_input, str):
         try:
-            # Try ISO format first
+
             date = datetime.fromisoformat(date_input.replace("Z", ""))
         except ValueError:
-            # Fallback for 'YYYY-MM-DD'
+    
             date = datetime.strptime(date_input, "%Y-%m-%d")
     elif isinstance(date_input, datetime):
         date = date_input
     else:
-        # If missing or unknown type, treat as now
         date = datetime.now()
     return max((datetime.now() - date).days, 1)
 
@@ -105,7 +100,6 @@ def calculate_post_score(user_interests_text, posts):
     recommendations.sort(key=lambda x: x["score"], reverse=True)
     return recommendations
 
-# ---------------- API Endpoint ----------------
 @app.post("/recommend_posts/", response_model=RecommendPostsResponse)
 async def recommend_posts(request: UserRequest):
     try:
@@ -126,4 +120,5 @@ async def recommend_posts(request: UserRequest):
 @app.get("/")
 def home():
     return {"message": "Backend running successfully on Render 🚀"}
+
 
